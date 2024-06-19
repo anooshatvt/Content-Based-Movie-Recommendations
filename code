@@ -1,0 +1,92 @@
+import pandas as pd
+from scipy.sparse import csr_matrix
+from sklearn.neighbors import NearestNeighbors
+
+# Load the MovieLens dataset
+movies_df = pd.read_csv('movies.csv', usecols=['movieId', 'title'], dtype={'movieId': 'int32', 'title': 'str'})
+ratings_df = pd.read_csv('ratings.csv', usecols=['userId', 'movieId', 'rating'],
+                        dtype={'userId': 'int32', 'movieId': 'int32', 'rating': 'float32'})
+
+# Merge the dataframes
+df = pd.merge(ratings_df, movies_df, on='movieId')
+
+# Filter out movies with NaN values
+combine_movie_rating = df.dropna(axis=0, subset=['title'])
+
+# Calculate total rating counts for each movie
+movie_ratingCount = (combine_movie_rating.
+                     groupby(by=['title'])['rating'].
+                     count().
+                     reset_index().
+                     rename(columns={'rating': 'totalRatingCount'})
+                     [['title', 'totalRatingCount']]
+                     )
+
+# Merge rating data with total rating counts
+rating_with_totalRatingCount = combine_movie_rating.merge(movie_ratingCount, left_on='title', right_on='title', how='left')
+
+# Set display format for float values
+pd.set_option('display.float_format', lambda x: '%.3f' % x)
+
+# Display statistics of total rating counts
+print(movie_ratingCount['totalRatingCount'].describe())
+
+# Set popularity threshold
+popularity_threshold = 50
+
+# Filter movies based on popularity threshold
+rating_popular_movie = rating_with_totalRatingCount.query('totalRatingCount >= @popularity_threshold')
+
+# Check if there are movies left after applying popularity threshold
+if rating_popular_movie.empty:
+    print("No movies meet the popularity threshold. Adjust the threshold or try a different approach.")
+else:
+    # Create a pivot matrix for collaborative filtering
+    movie_features_df = rating_popular_movie.pivot_table(index='title', columns='userId', values='rating').fillna(0)
+
+    # Fill missing values with zeros
+    movie_features_df = movie_features_df.fillna(0)
+
+    # Create a sparse matrix
+    movie_features_df_matrix = csr_matrix(movie_features_df.values)
+
+    # Build the k-nearest neighbors model
+    model_knn = NearestNeighbors(metric='cosine', algorithm='brute')
+
+    # Check if there are movies left before fitting the model
+    if movie_features_df_matrix.shape[0] > 0:
+        model_knn.fit(movie_features_df_matrix)
+
+        # Take user input for user ID
+        user_id = int(input("Enter a user ID: "))
+
+        # Find movies with the highest ratings by the user
+        user_highest_rated_movies = rating_popular_movie[rating_popular_movie['userId'] == user_id].nlargest(5, 'rating')
+
+        # Create a separate DataFrame for user-specific data
+        user_movie_features_df = user_highest_rated_movies.pivot_table(index='title', columns='userId', values='rating').fillna(0)
+
+        # Merge user-specific data with the original movie features
+        movie_features_df = pd.concat([movie_features_df, user_movie_features_df])
+
+        # Fill missing values with zeros
+        movie_features_df = movie_features_df.fillna(0)
+
+        # Create a new sparse matrix with user's highest-rated movies
+        movie_features_df_matrix = csr_matrix(movie_features_df.values)
+
+        # Build the k-nearest neighbors model with the updated matrix
+        model_knn = NearestNeighbors(metric='cosine', algorithm='brute')
+        model_knn.fit(movie_features_df_matrix)
+
+        # Find k-nearest neighbors for the user's highest-rated movies
+        distances, indices = model_knn.kneighbors(movie_features_df.iloc[-1, :].values.reshape(1, -1), n_neighbors=11)
+
+        # Display movie recommendations excluding the movies that the user has already rated
+        print(f"\nTop 10 Recommendations for User {user_id} based on highest-rated movies:\n")
+        for i in range(1, min(11, len(distances.flatten()))):
+            recommended_movie = movie_features_df.index[indices.flatten()[i]]
+            distance = distances.flatten()[i]
+            print(f"{i}: {recommended_movie}, with distance of {distance:.4f}")
+    else:
+        print("No movies left after applying popularity threshold. Adjust the threshold or try a different approach.")
